@@ -6,17 +6,13 @@ import {
   updateDoc,
   deleteDoc,
   onSnapshot,
-  increment,
 } from 'firebase/firestore';
 import {
   ref as storageRef,
-  uploadBytesResumable,
-  uploadBytes,
-  getDownloadURL,
   deleteObject,
 } from 'firebase/storage';
 import { db, storage, isFirebaseConfigured } from '../firebase/config';
-import { handleFirestoreError, OperationType, getFriendlyErrorMessage } from '../firebase/errors';
+import { handleFirestoreError, OperationType } from '../firebase/errors';
 import { sanitizeFirestoreData } from '../utils/sanitize';
 import { FileItem, Folder, ShareItem, UploadTaskItem } from '../types';
 import { useAuth } from './AuthContext';
@@ -94,7 +90,6 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
         snapshot.forEach((docSnap) => {
           loadedFolders.push(docSnap.data() as Folder);
         });
-        // Sort folders alphabetically
         loadedFolders.sort((a, b) => a.name.localeCompare(b.name));
         setFolders(loadedFolders);
       },
@@ -128,82 +123,55 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUploadQueue((prev) => prev.filter((item) => item.status === 'uploading' || item.status === 'pending'));
   }, []);
 
-  // Upload files with validation, progress, and real Firebase Storage integration
+  // Cloudinary Helper Function
+  const uploadFileToCloudinary = async (file: File, onProgress?: (progress: number) => void): Promise<string> => {
+    const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME;
+    const uploadPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET;
+
+    if (!cloudName || !uploadPreset) {
+      throw new Error('Cloudinary environment variables missing');
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('upload_preset', uploadPreset);
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`);
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) {
+          const percentCompleted = Math.round((event.loaded * 100) / event.total);
+          onProgress(percentCompleted);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          const response = JSON.parse(xhr.responseText);
+          resolve(response.secure_url);
+        } else {
+          reject(new Error('Cloudinary Upload Failed'));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(formData);
+    });
+  };
+
   const uploadFiles = useCallback(
-    async (fileList: File[], targetFolderId: string | null = activeFolderId) => {
+    async (fileList: File[], targetFolderId: string | null = null) => {
       if (!currentUser) {
-        showToast('error', 'Authentication Required', 'Please log in to upload files.');
-        return;
-      }
-
-      const totalSizeToUpload = fileList.reduce((acc, f) => acc + f.size, 0);
-      const currentStorageUsed = userProfile?.storageUsed || 0;
-      const currentStorageLimit = userProfile?.storageLimit || 10 * 1024 * 1024 * 1024;
-
-      if (currentStorageUsed + totalSizeToUpload > currentStorageLimit) {
-        showToast(
-          'error',
-          'Storage Limit Exceeded',
-          'You do not have enough storage space for this upload. Please delete some files or upgrade.'
-        );
+        showToast('error', 'Authentication Required', 'Please sign in to upload files.');
         return;
       }
 
       for (const file of fileList) {
         const uploadId = Math.random().toString(36).substring(2, 9);
-        const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const path = `users/${currentUser.uid}/files/${fileId}/${cleanName}`;
-        const fileRef = storageRef(storage, path);
 
-        console.log(`[FileNest] Upload initiated for "${file.name}" (${file.size} bytes) -> "${path}"`);
-
-        // Helper to record file metadata in Firestore and update storageUsed
-        const recordFileMetadata = async (downloadURL: string) => {
-          const now = new Date().toISOString();
-          const newFileDoc: FileItem = {
-            fileId,
-            ownerId: currentUser.uid,
-            fileName: file.name,
-            originalName: file.name,
-            storagePath: path,
-            downloadURL,
-            mimeType: file.type || 'application/octet-stream',
-            fileSize: file.size,
-            folderId: targetFolderId || '',
-            createdAt: now,
-            updatedAt: now,
-            isFavorite: false,
-            isDeleted: false,
-            shared: false,
-            thumbnailURL: file.type.startsWith('image/') ? downloadURL : '',
-          };
-
-          const fileDocRef = doc(db, 'users', currentUser.uid, 'files', fileId);
-          await setDoc(fileDocRef, sanitizeFirestoreData(newFileDoc));
-
-          // Atomically update user's storage used
-          const userDocRef = doc(db, 'users', currentUser.uid);
-          await updateDoc(userDocRef, {
-            storageUsed: increment(file.size),
-          });
-
-          setUploadQueue((prev) =>
-            prev.map((item) =>
-              item.id === uploadId ? { ...item, progress: 100, status: 'completed' } : item
-            )
-          );
-
-          showToast('success', 'File Uploaded', `${file.name} saved successfully.`);
-        };
-
-        const uploadTask = uploadBytesResumable(fileRef, file, {
-          contentType: file.type || 'application/octet-stream',
-        });
-
-        const cancelFn = () => uploadTask.cancel();
-
-        // Add to queue
+        // Queue-তে স্টেটাস যোগ করা
         setUploadQueue((prev) => [
           ...prev,
           {
@@ -213,78 +181,57 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
             size: file.size,
             progress: 0,
             status: 'uploading',
-            cancelFn,
           },
         ]);
 
-        uploadTask.on(
-          'state_changed',
-          (snapshot) => {
-            const progress =
-              snapshot.totalBytes > 0
-                ? Math.min(100, Math.max(0, Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)))
-                : 0;
-            console.log(`[FileNest] Progress for ${file.name}: ${progress}% (${snapshot.bytesTransferred}/${snapshot.totalBytes})`);
+        try {
+          // ১. ক্লাউডিনারিতে আপলোড
+          const downloadURL = await uploadFileToCloudinary(file, (progress) => {
             setUploadQueue((prev) =>
               prev.map((item) => (item.id === uploadId ? { ...item, progress } : item))
             );
-          },
-          async (error) => {
-            console.error(`[FileNest] Upload error for "${file.name}":`, error);
-            const isCanceled = error.code === 'storage/canceled';
+          });
 
-            // Resumable session fallback: if resumable upload is blocked by CORS/network on files < 25MB, try direct uploadBytes
-            if (!isCanceled && (error.code === 'storage/unknown' || error.code === 'storage/retry-limit-exceeded') && file.size < 25 * 1024 * 1024) {
-              console.warn(`[FileNest] Attempting direct single-request upload fallback for "${file.name}"...`);
-              try {
-                const directSnap = await uploadBytes(fileRef, file, {
-                  contentType: file.type || 'application/octet-stream',
-                });
-                const downloadURL = await getDownloadURL(directSnap.ref);
-                await recordFileMetadata(downloadURL);
-                return;
-              } catch (directErr) {
-                console.error('[FileNest] Direct upload fallback also encountered an error:', directErr);
-              }
-            }
+          // ২. ডাটাবেজে ফাইলের তথ্য সেভ
+          const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+          const newFileDoc = {
+            fileId,
+            fileName: file.name,
+            originalName: file.name,
+            fileSize: file.size,
+            mimeType: file.type || 'application/octet-stream',
+            downloadURL,
+            storagePath: `cloudinary/${fileId}`,
+            folderId: targetFolderId || activeFolderId || '',
+            ownerId: currentUser.uid,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            isFavorite: false,
+            isDeleted: false,
+            shared: false,
+          };
 
-            const friendly = getFriendlyErrorMessage(error);
-            setUploadQueue((prev) =>
-              prev.map((item) =>
-                item.id === uploadId
-                  ? {
-                      ...item,
-                      status: isCanceled ? 'canceled' : 'error',
-                      error: isCanceled ? 'Upload canceled' : friendly,
-                    }
-                  : item
-              )
-            );
-            if (!isCanceled) {
-              showToast('error', 'Upload Failed', `${file.name}: ${friendly}`);
-            }
-          },
-          async () => {
-            // Upload successful
-            try {
-              const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-              await recordFileMetadata(downloadURL);
-            } catch (err: any) {
-              console.error('Error saving file metadata:', err);
-              setUploadQueue((prev) =>
-                prev.map((item) =>
-                  item.id === uploadId
-                    ? { ...item, status: 'error', error: 'Failed to save file metadata.' }
-                    : item
-                )
-              );
-              showToast('error', 'Error Saving File', 'Unable to record file metadata.');
-            }
-          }
-        );
+          const fileDocRef = doc(db, 'users', currentUser.uid, 'files', fileId);
+          await setDoc(fileDocRef, sanitizeFirestoreData(newFileDoc));
+
+          // Queue আপডেট
+          setUploadQueue((prev) =>
+            prev.map((item) =>
+              item.id === uploadId ? { ...item, progress: 100, status: 'completed' } : item
+            )
+          );
+
+          showToast('success', 'Upload Complete', `${file.name} uploaded successfully.`);
+        } catch (error) {
+          console.error('Upload Error:', error);
+          setUploadQueue((prev) =>
+            prev.map((item) => (item.id === uploadId ? { ...item, status: 'error' } : item))
+          );
+          showToast('error', 'Upload Failed', `Failed to upload ${file.name}`);
+        }
       }
     },
-    [currentUser, userProfile, activeFolderId, showToast]
+    [currentUser, activeFolderId, showToast]
   );
 
   // File Actions
@@ -383,12 +330,14 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const permanentlyDeleteFile = async (file: FileItem) => {
     if (!currentUser) return;
     try {
-      // 1. Delete from Firebase Storage
+      // 1. Delete from Firebase Storage if path exists
       try {
-        const fRef = storageRef(storage, file.storagePath);
-        await deleteObject(fRef);
+        if (file.storagePath && !file.storagePath.startsWith('cloudinary/')) {
+          const fRef = storageRef(storage, file.storagePath);
+          await deleteObject(fRef);
+        }
       } catch (storageErr) {
-        console.warn('Storage file deletion note (may already be deleted):', storageErr);
+        console.warn('Storage file deletion note:', storageErr);
       }
 
       // 2. Delete Firestore doc
@@ -403,14 +352,6 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // Ignore
         }
       }
-
-      // 4. Update user's storageUsed in Firestore (safeguarded against negative values)
-      const userDocRef = doc(db, 'users', currentUser.uid);
-      const currentStorageUsed = userProfile?.storageUsed || 0;
-      const updatedStorageUsed = Math.max(0, currentStorageUsed - file.fileSize);
-      await updateDoc(userDocRef, {
-        storageUsed: updatedStorageUsed,
-      });
 
       showToast('info', 'File Deleted', `${file.fileName} permanently deleted.`);
     } catch (err) {
@@ -427,11 +368,12 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     try {
-      let totalBytesFreed = 0;
       for (const file of trashFiles) {
         try {
-          const fRef = storageRef(storage, file.storagePath);
-          await deleteObject(fRef);
+          if (file.storagePath && !file.storagePath.startsWith('cloudinary/')) {
+            const fRef = storageRef(storage, file.storagePath);
+            await deleteObject(fRef);
+          }
         } catch {
           // ignore
         }
@@ -443,15 +385,7 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
             // ignore
           }
         }
-        totalBytesFreed += file.fileSize;
       }
-
-      const userDocRef = doc(db, 'users', currentUser.uid);
-      const currentStorageUsed = userProfile?.storageUsed || 0;
-      const updatedStorageUsed = Math.max(0, currentStorageUsed - totalBytesFreed);
-      await updateDoc(userDocRef, {
-        storageUsed: updatedStorageUsed,
-      });
 
       showToast('success', 'Trash Emptied', `${trashFiles.length} files permanently removed.`);
     } catch (err) {
@@ -481,6 +415,7 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return folderId;
     } catch (err) {
       handleFirestoreError(err, OperationType.CREATE, `users/${currentUser.uid}/folders/${folderId}`);
+      throw err;
     }
   };
 
@@ -504,7 +439,6 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const deleteFolder = async (folderId: string) => {
     if (!currentUser) return;
     try {
-      // Move all files in this folder to root
       const folderFiles = files.filter((f) => f.folderId === folderId);
       for (const file of folderFiles) {
         const fRef = doc(db, 'users', currentUser.uid, 'files', file.fileId);
@@ -547,7 +481,6 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       await setDoc(shareDocRef, sanitizeFirestoreData(shareData));
 
-      // Update file doc with shareId and shared=true
       const fileDocRef = doc(db, 'users', currentUser.uid, 'files', file.fileId);
       await updateDoc(
         fileDocRef,
@@ -562,6 +495,7 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return shareUrl;
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `shares/${shareId}`);
+      throw err;
     }
   };
 
