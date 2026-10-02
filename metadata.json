@@ -1,0 +1,6 @@
+{
+  "name": "FileNest - Cloud File Storage & Sharing",
+  "description": "Secure, fast, and modern cloud storage and file sharing platform with real-time sync, multi-format previews, folders, trash recovery, and seamless link sharing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,92 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and storage usage state",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string", "maxLength": 100 },
+        "email": { "type": "string", "maxLength": 120 },
+        "photoURL": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string" },
+        "storageUsed": { "type": "number" },
+        "storageLimit": { "type": "number" }
+      },
+      "required": ["uid", "name", "email", "createdAt", "storageUsed", "storageLimit"]
+    },
+    "FileItem": {
+      "title": "FileItem",
+      "description": "Uploaded file metadata and storage references",
+      "type": "object",
+      "properties": {
+        "fileId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "originalName": { "type": "string", "maxLength": 255 },
+        "storagePath": { "type": "string", "maxLength": 500 },
+        "downloadURL": { "type": "string", "maxLength": 2048 },
+        "mimeType": { "type": "string", "maxLength": 120 },
+        "fileSize": { "type": "number" },
+        "folderId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "isFavorite": { "type": "boolean" },
+        "isDeleted": { "type": "boolean" },
+        "shared": { "type": "boolean" },
+        "shareId": { "type": "string", "maxLength": 128 },
+        "thumbnailURL": { "type": "string", "maxLength": 2048 }
+      },
+      "required": ["fileId", "ownerId", "fileName", "originalName", "storagePath", "downloadURL", "mimeType", "fileSize", "createdAt", "updatedAt", "isFavorite", "isDeleted", "shared"]
+    },
+    "Folder": {
+      "title": "Folder",
+      "description": "Folder hierarchy for organizing files",
+      "type": "object",
+      "properties": {
+        "folderId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["folderId", "ownerId", "name", "createdAt", "updatedAt"]
+    },
+    "Share": {
+      "title": "Share",
+      "description": "Public or shared file link descriptor",
+      "type": "object",
+      "properties": {
+        "shareId": { "type": "string" },
+        "fileId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "fileName": { "type": "string", "maxLength": 255 },
+        "originalName": { "type": "string", "maxLength": 255 },
+        "downloadURL": { "type": "string", "maxLength": 2048 },
+        "mimeType": { "type": "string", "maxLength": 120 },
+        "fileSize": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      },
+      "required": ["shareId", "fileId", "ownerId", "fileName", "originalName", "downloadURL", "mimeType", "fileSize", "createdAt", "enabled"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profile metadata and storage quotas"
+    },
+    "/users/{uid}/files/{fileId}": {
+      "schema": "FileItem",
+      "description": "User personal files collection"
+    },
+    "/users/{uid}/folders/{folderId}": {
+      "schema": "Folder",
+      "description": "User personal folders collection"
+    },
+    "/shares/{shareId}": {
+      "schema": "Share",
+      "description": "Shared file records readable when enabled"
+    }
+  }
+}
