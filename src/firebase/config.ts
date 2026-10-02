@@ -5,11 +5,19 @@ import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfigData from '../../firebase-applet-config.json';
 
+const rawBucket =
+  import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+  firebaseConfigData.storageBucket ||
+  'filenest-c333d.firebasestorage.app';
+
+// Strip any accidental gs:// prefix or trailing slashes
+const cleanBucket = rawBucket.replace(/^gs:\/\//, '').replace(/\/+$/, '').trim();
+
 export const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseConfigData.apiKey || "AIzaSyDGyHvo1H7lzDlcMFWC-_CttZqLZsDKl3M",
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfigData.authDomain || "filenest-c333d.firebaseapp.com",
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseConfigData.projectId || "filenest-c333d",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfigData.storageBucket || "filenest-c333d.firebasestorage.app",
+  storageBucket: cleanBucket,
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfigData.messagingSenderId || "294898822121",
   appId: import.meta.env.VITE_FIREBASE_APP_ID || firebaseConfigData.appId || "1:294898822121:web:d1f62379231583b76f3978",
   measurementId: firebaseConfigData.measurementId || "G-Z0ZL3BJB6N",
@@ -35,7 +43,9 @@ if (typeof window !== 'undefined') {
 // Authentication, Firestore, and Storage
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const storage = getStorage(app);
+
+// Explicitly pass the clean bucket URL to guarantee target bucket resolution
+export const storage = getStorage(app, cleanBucket ? `gs://${cleanBucket}` : undefined);
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });

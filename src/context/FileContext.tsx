@@ -11,6 +11,7 @@ import {
 import {
   ref as storageRef,
   uploadBytesResumable,
+  uploadBytes,
   getDownloadURL,
   deleteObject,
 } from 'firebase/storage';
@@ -155,6 +156,47 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const path = `users/${currentUser.uid}/files/${fileId}/${cleanName}`;
         const fileRef = storageRef(storage, path);
 
+        console.log(`[FileNest] Upload initiated for "${file.name}" (${file.size} bytes) -> "${path}"`);
+
+        // Helper to record file metadata in Firestore and update storageUsed
+        const recordFileMetadata = async (downloadURL: string) => {
+          const now = new Date().toISOString();
+          const newFileDoc: FileItem = {
+            fileId,
+            ownerId: currentUser.uid,
+            fileName: file.name,
+            originalName: file.name,
+            storagePath: path,
+            downloadURL,
+            mimeType: file.type || 'application/octet-stream',
+            fileSize: file.size,
+            folderId: targetFolderId || '',
+            createdAt: now,
+            updatedAt: now,
+            isFavorite: false,
+            isDeleted: false,
+            shared: false,
+            thumbnailURL: file.type.startsWith('image/') ? downloadURL : '',
+          };
+
+          const fileDocRef = doc(db, 'users', currentUser.uid, 'files', fileId);
+          await setDoc(fileDocRef, sanitizeFirestoreData(newFileDoc));
+
+          // Atomically update user's storage used
+          const userDocRef = doc(db, 'users', currentUser.uid);
+          await updateDoc(userDocRef, {
+            storageUsed: increment(file.size),
+          });
+
+          setUploadQueue((prev) =>
+            prev.map((item) =>
+              item.id === uploadId ? { ...item, progress: 100, status: 'completed' } : item
+            )
+          );
+
+          showToast('success', 'File Uploaded', `${file.name} saved successfully.`);
+        };
+
         const uploadTask = uploadBytesResumable(fileRef, file, {
           contentType: file.type || 'application/octet-stream',
         });
@@ -178,69 +220,55 @@ export const FileProvider: React.FC<{ children: React.ReactNode }> = ({ children
         uploadTask.on(
           'state_changed',
           (snapshot) => {
-            const progress = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+            const progress =
+              snapshot.totalBytes > 0
+                ? Math.min(100, Math.max(0, Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)))
+                : 0;
+            console.log(`[FileNest] Progress for ${file.name}: ${progress}% (${snapshot.bytesTransferred}/${snapshot.totalBytes})`);
             setUploadQueue((prev) =>
               prev.map((item) => (item.id === uploadId ? { ...item, progress } : item))
             );
           },
-          (error) => {
-            console.error('Upload error:', error);
+          async (error) => {
+            console.error(`[FileNest] Upload error for "${file.name}":`, error);
             const isCanceled = error.code === 'storage/canceled';
+
+            // Resumable session fallback: if resumable upload is blocked by CORS/network on files < 25MB, try direct uploadBytes
+            if (!isCanceled && (error.code === 'storage/unknown' || error.code === 'storage/retry-limit-exceeded') && file.size < 25 * 1024 * 1024) {
+              console.warn(`[FileNest] Attempting direct single-request upload fallback for "${file.name}"...`);
+              try {
+                const directSnap = await uploadBytes(fileRef, file, {
+                  contentType: file.type || 'application/octet-stream',
+                });
+                const downloadURL = await getDownloadURL(directSnap.ref);
+                await recordFileMetadata(downloadURL);
+                return;
+              } catch (directErr) {
+                console.error('[FileNest] Direct upload fallback also encountered an error:', directErr);
+              }
+            }
+
+            const friendly = getFriendlyErrorMessage(error);
             setUploadQueue((prev) =>
               prev.map((item) =>
                 item.id === uploadId
                   ? {
                       ...item,
                       status: isCanceled ? 'canceled' : 'error',
-                      error: isCanceled ? 'Upload canceled' : getFriendlyErrorMessage(error),
+                      error: isCanceled ? 'Upload canceled' : friendly,
                     }
                   : item
               )
             );
             if (!isCanceled) {
-              showToast('error', 'Upload Failed', `${file.name}: ${getFriendlyErrorMessage(error)}`);
+              showToast('error', 'Upload Failed', `${file.name}: ${friendly}`);
             }
           },
           async () => {
             // Upload successful
             try {
               const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-              const now = new Date().toISOString();
-
-              const newFileDoc: FileItem = {
-                fileId,
-                ownerId: currentUser.uid,
-                fileName: file.name,
-                originalName: file.name,
-                storagePath: path,
-                downloadURL,
-                mimeType: file.type || 'application/octet-stream',
-                fileSize: file.size,
-                folderId: targetFolderId || '',
-                createdAt: now,
-                updatedAt: now,
-                isFavorite: false,
-                isDeleted: false,
-                shared: false,
-                thumbnailURL: file.type.startsWith('image/') ? downloadURL : '',
-              };
-
-              const fileDocRef = doc(db, 'users', currentUser.uid, 'files', fileId);
-              await setDoc(fileDocRef, sanitizeFirestoreData(newFileDoc));
-
-              // Atomically update user's storage used
-              const userDocRef = doc(db, 'users', currentUser.uid);
-              await updateDoc(userDocRef, {
-                storageUsed: increment(file.size),
-              });
-
-              setUploadQueue((prev) =>
-                prev.map((item) =>
-                  item.id === uploadId ? { ...item, progress: 100, status: 'completed' } : item
-                )
-              );
-
-              showToast('success', 'File Uploaded', `${file.name} saved successfully.`);
+              await recordFileMetadata(downloadURL);
             } catch (err: any) {
               console.error('Error saving file metadata:', err);
               setUploadQueue((prev) =>

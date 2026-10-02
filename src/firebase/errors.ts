@@ -66,10 +66,18 @@ export function getFriendlyErrorMessage(err: unknown): string {
     return 'No account was found with this email.';
   }
   if (msg.includes('storage/unauthorized')) {
-    return "You don't have permission to access this file.";
+    return "You don't have permission to access or upload this file. Check your Firebase Storage rules.";
   }
   if (msg.includes('storage/object-not-found')) {
     return 'This file could not be found.';
+  }
+  if (
+    msg.includes('storage/unknown') ||
+    msg.includes('storage/retry-limit-exceeded') ||
+    msg.includes('Failed to fetch') ||
+    msg.toLowerCase().includes('cors')
+  ) {
+    return 'Upload failed due to CORS or network error. Please ensure Firebase Storage CORS is configured for your domain.';
   }
   if (
     msg.includes('permission-denied') ||
